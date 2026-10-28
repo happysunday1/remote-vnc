@@ -410,6 +410,7 @@ export class VncSession {
   // suppresses the echo of text that came FROM the remote side.
   private clipboardPoller: NodeJS.Timeout | undefined;
   private lastClipboardText = '';
+  private clipboardReadFailures = 0;
   private authFailed = false;
   /** The RFB handshake completed on the current bridge (webview said connected). */
   private sawConnected = false;
@@ -473,16 +474,38 @@ export class VncSession {
     };
 
     this.clipboardPoller = setInterval(() => {
-      if (this.disposed) {
+      // navigator.clipboard.readText() (which backs the VS Code clipboard API
+      // in a browser-based workbench like code-server) rejects unless the
+      // document is focused and the site has clipboard-read permission.
+      // Polling while the user is in another tab/app would surface a
+      // "Unable to read from the browser's clipboard" notification every
+      // 500ms, so only poll while this panel is active and the window has
+      // focus, and give up quietly after repeated rejections.
+      if (this.disposed || !this.panel.active || !vscode.window.state.focused) {
         return;
       }
-      void vscode.env.clipboard.readText().then((text) => {
-        if (this.disposed || text === this.lastClipboardText) {
-          return;
+      vscode.env.clipboard.readText().then(
+        (text) => {
+          this.clipboardReadFailures = 0;
+          if (this.disposed || text === this.lastClipboardText) {
+            return;
+          }
+          this.lastClipboardText = text;
+          void this.post({ type: 'clipboard', text });
+        },
+        () => {
+          // A rejection means missing permission or focus; the workbench
+          // already notifies, so just count and stop polling if it keeps
+          // happening instead of spamming every interval.
+          if (++this.clipboardReadFailures >= 3 && this.clipboardPoller) {
+            clearInterval(this.clipboardPoller);
+            this.clipboardPoller = undefined;
+            logger().info(
+              'clipboard polling stopped after repeated read failures — grant clipboard permission to this site to re-enable host-to-remote sync (restart the session to retry).'
+            );
+          }
         }
-        this.lastClipboardText = text;
-        void this.post({ type: 'clipboard', text });
-      });
+      );
     }, 500);
   }
 
