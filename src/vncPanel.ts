@@ -411,6 +411,10 @@ export class VncSession {
   private clipboardPoller: NodeJS.Timeout | undefined;
   private lastClipboardText = '';
   private clipboardReadFailures = 0;
+  // Tracked from webview blur/focus messages: vscode.window.state.focused is
+  // unreliable in code-server's remote extension host (stays true after the
+  // browser window blurs), so the webview reports its own focus instead.
+  private uiFocused = true;
   private authFailed = false;
   /** The RFB handshake completed on the current bridge (webview said connected). */
   private sawConnected = false;
@@ -476,12 +480,17 @@ export class VncSession {
     this.clipboardPoller = setInterval(() => {
       // navigator.clipboard.readText() (which backs the VS Code clipboard API
       // in a browser-based workbench like code-server) rejects unless the
-      // document is focused and the site has clipboard-read permission.
-      // Polling while the user is in another tab/app would surface a
-      // "Unable to read from the browser's clipboard" notification every
-      // 500ms, so only poll while this panel is active and the window has
-      // focus, and give up quietly after repeated rejections.
-      if (this.disposed || !this.panel.active || !vscode.window.state.focused) {
+      // document is focused and the site has clipboard-read permission, and
+      // the workbench turns EVERY rejection into a notification. Polling
+      // while the user is in another window spams that notification every
+      // 500ms, so only poll while the webview reports itself focused, and
+      // skip after repeated rejections (reset on the next focus event).
+      if (
+        this.disposed ||
+        !this.panel.active ||
+        !this.uiFocused ||
+        this.clipboardReadFailures >= 3
+      ) {
         return;
       }
       vscode.env.clipboard.readText().then(
@@ -494,16 +503,7 @@ export class VncSession {
           void this.post({ type: 'clipboard', text });
         },
         () => {
-          // A rejection means missing permission or focus; the workbench
-          // already notifies, so just count and stop polling if it keeps
-          // happening instead of spamming every interval.
-          if (++this.clipboardReadFailures >= 3 && this.clipboardPoller) {
-            clearInterval(this.clipboardPoller);
-            this.clipboardPoller = undefined;
-            logger().info(
-              'clipboard polling stopped after repeated read failures — grant clipboard permission to this site to re-enable host-to-remote sync (restart the session to retry).'
-            );
-          }
+          this.clipboardReadFailures++;
         }
       );
     }, 500);
@@ -638,6 +638,13 @@ export class VncSession {
         // poller does not echo it straight back to the remote.
         this.lastClipboardText = msg.text;
         void vscode.env.clipboard.writeText(msg.text);
+        break;
+      case 'focus':
+        this.uiFocused = msg.focused;
+        if (msg.focused) {
+          // The user is back — retry reads even if they kept failing before.
+          this.clipboardReadFailures = 0;
+        }
         break;
       case 'status':
         if (msg.state === 'connected') {
@@ -1066,6 +1073,7 @@ type ExtensionMessage =
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'clipboard'; text: string }
+  | { type: 'focus'; focused: boolean }
   | { type: 'status'; state: 'connecting' | 'connected' | 'disconnected'; clean?: boolean; width?: number; height?: number }
   | { type: 'desktopname'; name: string }
   | { type: 'securityfailure'; reason?: string; needs?: string[] }

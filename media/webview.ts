@@ -498,6 +498,14 @@ function connect(msg: Extract<ExtensionMessage, { type: 'connect' }>): void {
   });
 }
 
+// Clipboard polling on the host must pause when this frame loses focus:
+// navigator.clipboard.readText() rejects while unfocused and the workbench
+// turns every rejection into a notification. An iframe's blur/focus tracks
+// the browser window's focus, unlike vscode.window.state in the remote
+// extension host.
+window.addEventListener('blur', () => post({ type: 'focus', focused: false }));
+window.addEventListener('focus', () => post({ type: 'focus', focused: true }));
+
 window.addEventListener('message', (event: MessageEvent<ExtensionMessage>) => {
   const msg = event.data;
   if (!msg || typeof msg.type !== 'string') {
