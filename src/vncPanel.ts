@@ -404,6 +404,12 @@ export class VncSession {
   private readonly policy = new ReconnectPolicy(RECONNECT_INTERVAL_MS);
   private bridge: VncBridge;
   private reconnectTimer: NodeJS.Timeout | undefined;
+
+  // host -> remote clipboard sync. VS Code has no clipboard change event, so
+  // the host clipboard is polled; lastClipboardText both detects changes and
+  // suppresses the echo of text that came FROM the remote side.
+  private clipboardPoller: NodeJS.Timeout | undefined;
+  private lastClipboardText = '';
   private authFailed = false;
   /** The RFB handshake completed on the current bridge (webview said connected). */
   private sawConnected = false;
@@ -465,6 +471,19 @@ export class VncSession {
       parkCursor: this.parkServerCursor,
       crop: this.visibleArea,
     };
+
+    this.clipboardPoller = setInterval(() => {
+      if (this.disposed) {
+        return;
+      }
+      void vscode.env.clipboard.readText().then((text) => {
+        if (this.disposed || text === this.lastClipboardText) {
+          return;
+        }
+        this.lastClipboardText = text;
+        void this.post({ type: 'clipboard', text });
+      });
+    }, 500);
   }
 
   private wireBridge(bridge: VncBridge): void {
@@ -590,6 +609,12 @@ export class VncSession {
           void this.post(this.pendingConnect);
           this.pendingConnect = undefined;
         }
+        break;
+      case 'clipboard':
+        // remote -> host clipboard sync. Record the text so the host-side
+        // poller does not echo it straight back to the remote.
+        this.lastClipboardText = msg.text;
+        void vscode.env.clipboard.writeText(msg.text);
         break;
       case 'status':
         if (msg.state === 'connected') {
@@ -968,6 +993,10 @@ export class VncSession {
     }
     this.disposed = true;
     this.clearReconnectTimer();
+    if (this.clipboardPoller) {
+      clearInterval(this.clipboardPoller);
+      this.clipboardPoller = undefined;
+    }
     this.flushRecordingWaiters();
     this.rejectPendingCaptures();
     this.bridge.dispose();
@@ -1007,11 +1036,13 @@ type ExtensionMessage =
   | { type: 'disconnect' }
   | { type: 'reconnecting' }
   | { type: 'screenshot' }
+  | { type: 'clipboard'; text: string }
   | { type: 'record-start'; format: RecordingFormat; fps: number }
   | { type: 'record-stop' };
 
 type WebviewMessage =
   | { type: 'ready' }
+  | { type: 'clipboard'; text: string }
   | { type: 'status'; state: 'connecting' | 'connected' | 'disconnected'; clean?: boolean; width?: number; height?: number }
   | { type: 'desktopname'; name: string }
   | { type: 'securityfailure'; reason?: string; needs?: string[] }

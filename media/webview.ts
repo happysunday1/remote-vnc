@@ -27,6 +27,7 @@ type ExtensionMessage =
   | { type: 'disconnect' }
   | { type: 'reconnecting' }
   | { type: 'screenshot' }
+  | { type: 'clipboard'; text: string }
   | { type: 'record-start'; format: RecordingFormat; fps: number }
   | { type: 'record-stop' };
 
@@ -490,6 +491,11 @@ function connect(msg: Extract<ExtensionMessage, { type: 'connect' }>): void {
       post({ type: 'desktopname', name: e.detail.name });
     }
   });
+
+  // remote -> host clipboard sync: the server sent new clipboard text.
+  rfb.addEventListener('clipboard', (e: CustomEvent<{ text: string }>) => {
+    post({ type: 'clipboard', text: e.detail?.text ?? '' });
+  });
 }
 
 window.addEventListener('message', (event: MessageEvent<ExtensionMessage>) => {
@@ -525,6 +531,9 @@ window.addEventListener('message', (event: MessageEvent<ExtensionMessage>) => {
     }
   } else if (msg.type === 'record-start') {
     startSessionRecording(msg.format, msg.fps);
+  } else if (msg.type === 'clipboard') {
+    // host -> remote clipboard sync
+    rfb?.clipboardPasteFrom(msg.text);
   } else if (msg.type === 'record-stop') {
     if (recorder) {
       stopRecorder('stopped');
