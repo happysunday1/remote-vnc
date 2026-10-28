@@ -414,7 +414,9 @@ export class VncSession {
   // Tracked from webview blur/focus messages: vscode.window.state.focused is
   // unreliable in code-server's remote extension host (stays true after the
   // browser window blurs), so the webview reports its own focus instead.
-  private uiFocused = true;
+  // Starts FALSE: before the webview's first focus message we must assume
+  // unfocused, or the poller would run before any focus tracking exists.
+  private uiFocused = false;
   // Set when the webview reports it can use the browser clipboard API itself
   // (browser workbench); the host then stops its clipboard polling/writes.
   private webviewHasClipboard = false;
@@ -507,6 +509,11 @@ export class VncSession {
         },
         () => {
           this.clipboardReadFailures++;
+          if (this.clipboardReadFailures === 3) {
+            logger().info(
+              'clipboard: host readText rejected 3 times, pausing until refocus'
+            );
+          }
         }
       );
     }, 500);
@@ -658,6 +665,7 @@ export class VncSession {
           clearInterval(this.clipboardPoller);
           this.clipboardPoller = undefined;
         }
+        logger().info('clipboard: webview took over; host poller stopped');
         break;
       case 'focus':
         this.uiFocused = msg.focused;

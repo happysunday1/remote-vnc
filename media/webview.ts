@@ -526,8 +526,14 @@ async function probeLocalClipboard(): Promise<void> {
     lastLocalClipboard = await navigator.clipboard.readText();
     hostHandlesClipboard = false;
     post({ type: 'clipboard-capable' });
-  } catch {
+    post({ type: 'log', level: 'info', message: 'clipboard: webview probe OK, taking over clipboard sync' });
+  } catch (err) {
     // No clipboard access from this frame — the host keeps polling.
+    post({
+      type: 'log',
+      level: 'info',
+      message: `clipboard: webview probe FAILED (${describe(err)}) — host keeps polling`,
+    });
   }
 }
 void probeLocalClipboard();
@@ -552,9 +558,13 @@ setInterval(() => {
 // turns every rejection into a notification. An iframe's blur/focus tracks
 // the browser window's focus, unlike vscode.window.state in the remote
 // extension host.
-window.addEventListener('blur', () => post({ type: 'focus', focused: false }));
+window.addEventListener('blur', () => {
+  post({ type: 'focus', focused: false });
+  post({ type: 'log', level: 'info', message: 'clipboard: frame blurred' });
+});
 window.addEventListener('focus', () => {
   post({ type: 'focus', focused: true });
+  post({ type: 'log', level: 'info', message: 'clipboard: frame focused' });
   // The startup probe may have run before this frame ever had focus; retry
   // on the first real focus so browser workbenches reliably take over the
   // clipboard from the extension host.
