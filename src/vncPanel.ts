@@ -415,6 +415,9 @@ export class VncSession {
   // unreliable in code-server's remote extension host (stays true after the
   // browser window blurs), so the webview reports its own focus instead.
   private uiFocused = true;
+  // Set when the webview reports it can use the browser clipboard API itself
+  // (browser workbench); the host then stops its clipboard polling/writes.
+  private webviewHasClipboard = false;
   private authFailed = false;
   /** The RFB handshake completed on the current bridge (webview said connected). */
   private sawConnected = false;
@@ -635,9 +638,26 @@ export class VncSession {
         break;
       case 'clipboard':
         // remote -> host clipboard sync. Record the text so the host-side
-        // poller does not echo it straight back to the remote.
+        // poller does not echo it straight back to the remote. When the
+        // webview proved it has clipboard access (browser workbench like
+        // code-server), it already wrote the clipboard itself — writing here
+        // too would reject (the workbench document is not focused while the
+        // user interacts with the VNC iframe) and surface a notification.
         this.lastClipboardText = msg.text;
-        void vscode.env.clipboard.writeText(msg.text);
+        if (!this.webviewHasClipboard) {
+          void vscode.env.clipboard.writeText(msg.text).then(undefined, () => {});
+        }
+        break;
+      case 'clipboard-capable':
+        // The webview can read/write the browser clipboard itself (it is the
+        // focused document while the user works in it; the extension host's
+        // clipboard calls proxy to the unfocused workbench document and
+        // reject). Stand down: stop polling and skip host-side writes.
+        this.webviewHasClipboard = true;
+        if (this.clipboardPoller) {
+          clearInterval(this.clipboardPoller);
+          this.clipboardPoller = undefined;
+        }
         break;
       case 'focus':
         this.uiFocused = msg.focused;
@@ -1073,6 +1093,7 @@ type ExtensionMessage =
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'clipboard'; text: string }
+  | { type: 'clipboard-capable' }
   | { type: 'focus'; focused: boolean }
   | { type: 'status'; state: 'connecting' | 'connected' | 'disconnected'; clean?: boolean; width?: number; height?: number }
   | { type: 'desktopname'; name: string }

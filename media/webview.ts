@@ -494,9 +494,58 @@ function connect(msg: Extract<ExtensionMessage, { type: 'connect' }>): void {
 
   // remote -> host clipboard sync: the server sent new clipboard text.
   rfb.addEventListener('clipboard', (e: CustomEvent<{ text: string }>) => {
-    post({ type: 'clipboard', text: e.detail?.text ?? '' });
+    const text = e.detail?.text ?? '';
+    lastLocalClipboard = text;
+    // Write straight from this frame: at copy time THIS iframe holds the
+    // focus, and the browser clipboard API requires the calling document to
+    // be focused — the same write issued by the extension host (code-server
+    // workbench document) rejects while the user is interacting here. The
+    // host-side write in the 'clipboard' message handler is the fallback for
+    // desktop VS Code, where webviews may get no clipboard access at all.
+    void navigator.clipboard.writeText(text).catch(() => {});
+    post({ type: 'clipboard', text });
   });
 }
+
+// ---- Clipboard sync (browser path) ----
+// Chrome grants clipboard access only to the FOCUSED document. While the
+// user works in the VNC view, this iframe is the focused document and the
+// code-server workbench behind it is not — so clipboard reads/writes issued
+// by the extension host reject (and each rejection became a workbench
+// notification). Reading and writing here instead works precisely because
+// this frame has the focus at the moment it matters.
+//
+// Desktop VS Code is the opposite: its webviews may be denied clipboard
+// access entirely, so the extension host keeps a polling loop as a fallback
+// until we report that our own read worked ('clipboard-capable').
+let lastLocalClipboard = '';
+let hostHandlesClipboard = true;
+
+async function probeLocalClipboard(): Promise<void> {
+  try {
+    lastLocalClipboard = await navigator.clipboard.readText();
+    hostHandlesClipboard = false;
+    post({ type: 'clipboard-capable' });
+  } catch {
+    // No clipboard access from this frame — the host keeps polling.
+  }
+}
+void probeLocalClipboard();
+
+// host -> remote, browser path: push local clipboard changes into the
+// session. Only while this frame is focused (reads reject otherwise).
+setInterval(() => {
+  if (hostHandlesClipboard || !document.hasFocus()) {
+    return;
+  }
+  navigator.clipboard.readText().then((text) => {
+    if (text === lastLocalClipboard) {
+      return;
+    }
+    lastLocalClipboard = text;
+    rfb?.clipboardPasteFrom(text);
+  }, () => {});
+}, 500);
 
 // Clipboard polling on the host must pause when this frame loses focus:
 // navigator.clipboard.readText() rejects while unfocused and the workbench
@@ -504,7 +553,15 @@ function connect(msg: Extract<ExtensionMessage, { type: 'connect' }>): void {
 // the browser window's focus, unlike vscode.window.state in the remote
 // extension host.
 window.addEventListener('blur', () => post({ type: 'focus', focused: false }));
-window.addEventListener('focus', () => post({ type: 'focus', focused: true }));
+window.addEventListener('focus', () => {
+  post({ type: 'focus', focused: true });
+  // The startup probe may have run before this frame ever had focus; retry
+  // on the first real focus so browser workbenches reliably take over the
+  // clipboard from the extension host.
+  if (hostHandlesClipboard) {
+    void probeLocalClipboard();
+  }
+});
 
 window.addEventListener('message', (event: MessageEvent<ExtensionMessage>) => {
   const msg = event.data;
@@ -540,7 +597,10 @@ window.addEventListener('message', (event: MessageEvent<ExtensionMessage>) => {
   } else if (msg.type === 'record-start') {
     startSessionRecording(msg.format, msg.fps);
   } else if (msg.type === 'clipboard') {
-    // host -> remote clipboard sync
+    // host -> remote clipboard sync (desktop path; in a browser the webview
+    // reads the local clipboard itself). Track the text so a webview-side
+    // poller does not paste it straight back.
+    lastLocalClipboard = msg.text;
     rfb?.clipboardPasteFrom(msg.text);
   } else if (msg.type === 'record-stop') {
     if (recorder) {
